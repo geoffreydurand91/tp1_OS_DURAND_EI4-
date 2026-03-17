@@ -5,60 +5,115 @@
 #include <readline/readline.h>
 #include <readline/history.h>
 
-// variables globales pour les mots de la commande
-char **Mots = NULL;
-int NMots = 0;
+#define NBMAXC 10 // limite du nombre de commandes internes a 10
 
-// fonction pour copier dynamiquement une chaine
+// on cree un moule pour associer un mot cle a un bout de code c
+typedef struct {
+    char *nom;
+    int (*fonction)(int N, char *P[]);
+} CommandeInterne;
+
+// variables globales pour garder la trace des mots decoupable
+static char **Mots = NULL; 
+static int NMots = 0;      
+CommandeInterne TabComInt[NBMAXC]; // notre dictionnaire de commandes
+int NbComInt = 0; // le compteur pour savoir ou on en est dans le dico
+
+// copie une chaine proprement dans la memoire
 char *copyString(char *s) {
     if (s == NULL) return NULL;
-    int longueur = strlen(s);
-    char *copie = malloc(longueur + 1);
-    if (copie != NULL) {
-        strcpy(copie, s);
+    char *copy = malloc(strlen(s) + 1);
+    if (copy != NULL) {
+        strcpy(copy, s);
     }
-    return copie;
+    return copy;
 }
 
-// fonction pour analyser la commande et compter les mots
+// decoupe la phrase tapee par l'utilisateur en mots separes
 int analyseCom(char *b) {
-    char *token;
     char *delim = " \t\n";
-    int capacite = 10;
-    
-    // liberation de l'ancien tableau si existant
+    char *token;
+    int capacite_max = 20;
+
+    // on vide l'ancienne commande si elle existe
     if (Mots != NULL) {
         for (int i = 0; i < NMots; i++) {
             free(Mots[i]);
         }
         free(Mots);
     }
-    
-    // allocation initiale du tableau de mots
-    Mots = malloc(capacite * sizeof(char *));
+
+    // on prepare le nouveau tableau de mots
+    Mots = malloc(capacite_max * sizeof(char *));
     NMots = 0;
-    char *chaine_a_analyser = b;
-    
-    // decoupage de la chaine
-    while ((token = strsep(&chaine_a_analyser, delim)) != NULL) {
+
+    // on lit chaque morceau et on le range
+    while ((token = strsep(&b, delim)) != NULL) {
         if (*token != '\0') {
-            // reallocation si le tableau est plein
-            if (NMots >= capacite) {
-                capacite *= 2;
-                Mots = realloc(Mots, capacite * sizeof(char *));
-            }
             Mots[NMots] = copyString(token);
             NMots++;
         }
     }
     
-    // ajout d'un pointeur nul a la fin (utile pour execvp plus tard)
-    if (NMots >= capacite) {
-        Mots = realloc(Mots, (NMots + 1) * sizeof(char *));
-    }
-    Mots[NMots] = NULL;
-    
+    // on met un vide a la fin pour eviter les bugs plus tard
+    Mots[NMots] = NULL; 
     return NMots;
+}
+
+// ce qui se passe quand on tape exit
+int Sortie(int N, char *P[]) {
+    // on nettoie la memoire avant de partir
+    if (Mots != NULL) {
+        for (int i = 0; i < NMots; i++) {
+            free(Mots[i]);
+        }
+        free(Mots);
+    }
+    printf("fermeture du programme...\n");
+    exit(0);
+    return 0; 
+}
+
+// fonction pour apprendre une nouvelle commande a notre programme
+void ajouteCom(char *nom, int (*fonc)(int, char **)) {
+    // on s'assure qu'on a encore de la place dans le tableau
+    if (NbComInt >= NBMAXC) {
+        fprintf(stderr, "le tableau des commandes est plein\n");
+        exit(1);
+    }
+    // on enregistre le nom et la fonction correspondante
+    TabComInt[NbComInt].nom = nom;
+    TabComInt[NbComInt].fonction = fonc;
+    NbComInt++;
+}
+
+// c'est ici qu'on charge les commandes connues au lancement
+void majComInt(void) {
+    ajouteCom("exit", Sortie);
+}
+
+// pour verifier ce qu'on a enregistre
+void listeComInt(void) {
+    printf("--- liste des commandes internes ---\n");
+    for (int i = 0; i < NbComInt; i++) {
+        printf("- %s\n", TabComInt[i].nom);
+    }
+    printf("------------------------------------\n");
+}
+
+// verifie si ce qu'on a tape est connu, et lance le code si c'est le cas
+int execComInt(int N, char **P) {
+    if (N == 0 || P[0] == NULL) return 0;
+    
+    // on compare le premier mot avec notre dictionnaire
+    for (int i = 0; i < NbComInt; i++) {
+        if (strcmp(P[0], TabComInt[i].nom) == 0) {
+            // on a trouve, donc on lance la fonction
+            TabComInt[i].fonction(N, P);
+            return 1; // on dit au programme principal que c'est bon
+        }
+    }
+    return 0; // on a rien trouve de correspondant
 }
 
 int main(void) {
@@ -68,55 +123,53 @@ int main(void) {
     char *ligne_saisie;
     char caractere_fin;
 
-    // recuperation du nom de la machine
+    // on met a jour le dictionnaire des commandes des le debut
+    majComInt();
+
+    // preparation de l'affichage du terminal
     if (gethostname(nom_machine, sizeof(nom_machine)) != 0) {
-        strcpy(nom_machine, "machine_inconnue");
+        strcpy(nom_machine, "inconnu");
     }
 
-    // recuperation de la variable d'environnement user
     nom_utilisateur = getenv("USER");
     if (nom_utilisateur == NULL) {
         nom_utilisateur = "inconnu";
     }
 
-    // verification des droits pour le caractere du prompt
     if (geteuid() == 0) {
         caractere_fin = '#';
     } else {
         caractere_fin = '$';
     }
 
-    // formatage dynamique de la chaine du prompt
     snprintf(prompt, sizeof(prompt), "%s@%s%c ", nom_utilisateur, nom_machine, caractere_fin);
 
+    // le coeur du programme qui tourne en boucle
     while (1) {
         ligne_saisie = readline(prompt);
         
-        // gestion du ctrl+d (eof)
+        // on quitte si on fait ctrl+d
         if (ligne_saisie == NULL) {
             printf("\n");
             break;
         }
 
-        // traitement de la saisie si non vide
         if (strlen(ligne_saisie) > 0) {
             add_history(ligne_saisie);
             analyseCom(ligne_saisie);
             
-            // affichage du nom de la commande et de ses parametres
             if (NMots > 0) {
-                printf("commande : %s\n", Mots[0]);
-                for (int i = 1; i < NMots; i++) {
-                    printf("parametre %d : %s\n", i, Mots[i]);
+                // on teste si le premier mot tape est une de nos commandes
+                if (execComInt(NMots, Mots) == 0) {
+                    // si la fonction a renvoye 0, on previent que ca n'existe pas
+                    printf("la commande '%s' n'est pas reconnue pour le moment.\n", Mots[0]);
                 }
             }
         }
-
-        // liberation de la memoire allouee par readline
         free(ligne_saisie);
     }
     
-    // liberation finale du tableau global avant de quitter
+    // nettoyage de fin
     if (Mots != NULL) {
         for (int i = 0; i < NMots; i++) {
             free(Mots[i]);
