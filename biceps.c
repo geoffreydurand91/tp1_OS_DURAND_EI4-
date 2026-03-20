@@ -2,204 +2,81 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <string.h>
-#include <sys/types.h>
-#include <sys/wait.h>
 #include <signal.h>
 #include <readline/readline.h>
 #include <readline/history.h>
+// inclusion de notre librairie maison pour la gestion des commandes
+#include "gescom.h" 
 
-#define NBMAXC 10 // definit la taille maximum du tableau des commandes internes
+// variable globale pour conserver le chemin du fichier cache
+char chemin_historique[1024];
 
-// definition du type pour stocker une commande interne et sa fonction associee
-typedef struct {
-    char *nom; // le nom de la commande tapee par l'utilisateur
-    int (*fonction)(int N, char *P[]); // le pointeur vers la fonction c correspondante
-} CommandeInterne;
-
-// declaration des variables globales utiles dans tout le fichier
-static char **Mots = NULL; // tableau dynamique qui contiendra les mots d'une commande
-static int NMots = 0; // compteur du nombre de mots trouves
-CommandeInterne TabComInt[NBMAXC]; // le tableau qui liste nos commandes internes
-int NbComInt = 0; // le compteur de commandes internes actuellement enregistrees
-char chemin_historique[1024]; // chemin vers le fichier de sauvegarde de l'historique
-
-// fonction qui alloue de la memoire pour dupliquer une chaine de caracteres
-char *copyString(char *s) {
-    if (s == NULL) return NULL; // on evite de copier du vide
-    char *copy = malloc(strlen(s) + 1); // on demande la taille de la chaine plus le caractere de fin
-    if (copy != NULL) strcpy(copy, s); // on effectue la copie si la memoire a bien ete donnee
-    return copy;
-}
-
-// fonction qui decoupe une commande simple en un tableau de mots
-int analyseCom(char *b) {
-    char *delim = " \t\n"; // les caracteres qui separent les mots (espace, tabulation, saut de ligne)
-    char *token; // le mot en cours d'extraction
-    int capacite_max = 20; // on limite a 20 mots pour economiser la memoire
-
-    // on nettoie le tableau precedent pour eviter de saturer la memoire
-    if (Mots != NULL) {
-        for (int i = 0; i < NMots; i++) free(Mots[i]);
-        free(Mots);
-    }
-
-    // on cree un nouveau tableau vide pour les mots a venir
-    Mots = malloc(capacite_max * sizeof(char *));
-    NMots = 0; // on remet le compteur de mots a zero
-
-    // on decoupe la chaine mot par mot grace a strsep
-    while ((token = strsep(&b, delim)) != NULL) {
-        if (*token != '\0') { // on ignore les mots vides dus aux espaces multiples
-            Mots[NMots] = copyString(token); // on range le mot trouve dans notre tableau global
-            NMots++; // on incremente notre compteur
-        }
-    }
-    
-    // on ajoute un vide a la fin du tableau car la fonction execvp en a besoin
-    Mots[NMots] = NULL; 
-    return NMots; // on renvoie le nombre de mots trouves
-}
-
-// verifie si la ligne contient autre chose que des espaces pour l'historique
+// fonction filtre pour eviter d'enregistrer des chaines vides dans l'historique
 int est_ligne_utile(const char *ligne) {
+    // on parcourt chaque caractere de la chaine
     while (*ligne != '\0') {
-        if (*ligne != ' ' && *ligne != '\t') return 1; // vrai des qu'on trouve un caractere normal
+        // des qu'un caractere n'est pas un separateur blanc, la ligne est utile
+        if (*ligne != ' ' && *ligne != '\t') return 1;
         ligne++;
     }
-    return 0; // faux si on n'a trouve que des espaces ou la fin
+    // si on arrive a la fin sans trouver de vrai caractere, elle est inutile
+    return 0;
 }
 
-// fonction executee quand l'utilisateur tape exit
+// fonction implementant la commande interne exit
 int Sortie(int N, char *P[]) {
-    // on doit vider la memoire proprement avant de tuer le programme
-    if (Mots != NULL) {
-        for (int i = 0; i < NMots; i++) free(Mots[i]);
-        free(Mots);
-    }
-    // on sauvegarde l'historique dans le fichier avant de partir
+    // nettoyage memoire via la fonction exposee par notre librairie
+    libererMots();
+    // sauvegarde de l'historique de la session sur le disque dur
     write_history(chemin_historique);
     printf("sortie correcte du programme biceps.\n");
-    exit(0); // on quitte avec le code de succes 0
+    // terminaison propre du processus avec un code de succes
+    exit(0);
     return 0; 
 }
 
-// fonction executee quand l'utilisateur tape cd
+// fonction implementant le changement de repertoire (cd)
 int change_dir(int n, char *p[]) {
-    // si un chemin est donne, on essaie d'y aller
+    // si un dossier de destination est specifie dans les arguments
     if (n > 1) {
-        if (chdir(p[1]) != 0) perror("erreur cd"); // si on echoue, on affiche l'erreur systeme
+        // appel systeme chdir, et affichage d'erreur si le dossier n'existe pas
+        if (chdir(p[1]) != 0) perror("erreur cd");
     } else {
-        chdir(getenv("HOME")); // si aucun argument n'est donne, on rentre a la maison
+        // comportement par defaut: retour au dossier personnel (home)
+        chdir(getenv("HOME"));
     }
     return 0;
 }
 
-// fonction executee quand l'utilisateur tape pwd
+// fonction implementant l'affichage du repertoire courant (pwd)
 int print_wd(int n, char *p[]) {
-    char cwd[1024]; // tableau temporaire pour stocker le chemin
-    // on demande au systeme de remplir notre tableau avec le chemin actuel
+    char cwd[1024];
+    // appel systeme getcwd pour recuperer le chemin absolu
     if (getcwd(cwd, sizeof(cwd)) != NULL) {
-        printf("%s\n", cwd); // on l'affiche a l'ecran
+        printf("%s\n", cwd);
     } else {
-        perror("erreur pwd"); // on affiche une erreur si le systeme n'y arrive pas
+        perror("erreur pwd");
     }
     return 0;
 }
 
-// fonction executee quand l'utilisateur tape vers
+// fonction implementant l'affichage de la version
 int version(int n, char *p[]) {
-    printf("biceps version 1.0\n"); // on affiche simplement la version en dur
+    // affichage statique de la version actuelle du programme
+    printf("biceps version 1.0\n");
     return 0;
 }
 
-// fonction pour inserer une nouvelle commande dans notre tableau
-void ajouteCom(char *nom, int (*fonc)(int, char **)) {
-    // on bloque le programme si on essaie d'en ajouter trop
-    if (NbComInt >= NBMAXC) {
-        fprintf(stderr, "le tableau des commandes est plein\n");
-        exit(1);
-    }
-    // on sauvegarde le nom et le code a executer a l'emplacement actuel
-    TabComInt[NbComInt].nom = nom;
-    TabComInt[NbComInt].fonction = fonc;
-    NbComInt++; // on passe a la case suivante pour la prochaine fois
-}
-
-// fonction qui regroupe toutes les initialisations de nos commandes internes
+// fonction chargee d'initialiser les commandes specifiques a ce shell
 void majComInt(void) {
+    // enregistrement de chaque couple (nom de commande, fonction c associee)
     ajouteCom("exit", Sortie);
     ajouteCom("cd", change_dir);
     ajouteCom("pwd", print_wd);
     ajouteCom("vers", version);
 }
 
-// fonction qui cherche et lance une commande si elle est dans notre dictionnaire
-int execComInt(int N, char **P) {
-    if (N == 0 || P[0] == NULL) return 0; // on ne fait rien s'il n'y a pas de mots
-    
-    // on passe en revue chaque ligne de notre dictionnaire de commandes
-    for (int i = 0; i < NbComInt; i++) {
-        // si le premier mot tape correspond a un nom connu
-        if (strcmp(P[0], TabComInt[i].nom) == 0) {
-            TabComInt[i].fonction(N, P); // on declenche la fonction
-            return 1; // on previent qu'on a reussi a la traiter
-        }
-    }
-    return 0; // on previent qu'on a rien trouve
-}
-
-// fonction qui cree un processus pour lancer un programme du systeme
-int execComExt(char **P) {
-    pid_t pid = fork(); // on clone notre programme actuel en deux
-
-    if (pid < 0) {
-        perror("erreur fork"); // si le clonage rate
-        return -1;
-    } else if (pid == 0) {
-        // ici on est dans le clone (l'enfant)
-#ifdef TRACE
-        printf("[trace] processus enfant va executer : %s\n", P[0]);
-#endif
-        // on demande au systeme d'ecraser l'enfant par le programme voulu
-        execvp(P[0], P);
-        // si on arrive ici, c'est que execvp n'a pas trouve le programme
-        printf("erreur d'execution : commande introuvable\n");
-        exit(1); // on tue l'enfant defaillant
-    } else {
-        // ici on est dans le parent (notre shell)
-        waitpid(pid, NULL, 0); // on met le parent en pause jusqu'a ce que l'enfant finisse
-#ifdef TRACE
-        printf("[trace] processus enfant termine\n");
-#endif
-    }
-    return 0;
-}
-
-// fonction pour decouper une ligne contenant plusieurs commandes separees par des points-virgules
-void traiterSequence(char *ligne) {
-    char *commande_seule; // pointeur pour stocker chaque sous-commande
-    char *delimiteur_sequence = ";"; // le caractere qui separe nos commandes
-
-    // on boucle pour decouper la phrase globale a chaque fois qu'on voit un point-virgule
-    while ((commande_seule = strsep(&ligne, delimiteur_sequence)) != NULL) {
-        // on verifie que le morceau recupere contient bien du texte
-        if (strlen(commande_seule) > 0) {
-            // on decoupe cette sous-commande en mots (espaces)
-            analyseCom(commande_seule);
-            
-            // si on a bien des mots a traiter
-            if (NMots > 0) {
-                // on tente l'execution interne en priorite
-                if (execComInt(NMots, Mots) == 0) {
-                    // si echec, on confie la tache au systeme
-                    execComExt(Mots);
-                }
-            }
-        }
-    }
-}
-
-// fonction principale au lancement du programme
+// point d'entree principal du programme
 int main(void) {
     char nom_machine[256];
     char *nom_utilisateur;
@@ -207,65 +84,63 @@ int main(void) {
     char *ligne_saisie;
     char caractere_fin;
 
-    // on demande au systeme d'ignorer le signal d'interruption lie a ctrl-c
+    // desactivation du signal d'interruption materielle (ctrl-c)
     signal(SIGINT, SIG_IGN);
+    
+    // chargement des commandes dans la memoire de la librairie gescom
+    majComInt();
 
-    majComInt(); // on charge la memoire des commandes connues
-
-    // on cherche comment s'appelle l'ordinateur
+    // resolution du nom d'hote de la machine locale
     if (gethostname(nom_machine, sizeof(nom_machine)) != 0) strcpy(nom_machine, "inconnu");
     
-    // on regarde dans les variables du terminal qui est connecte
+    // resolution de l'identifiant de l'utilisateur connecte
     nom_utilisateur = getenv("USER");
     if (nom_utilisateur == NULL) nom_utilisateur = "inconnu";
     
-    // on adapte le symbole final si on est un administrateur ou non
+    // choix du delimiteur final selon les droits (root ou standard)
     caractere_fin = (geteuid() == 0) ? '#' : '$';
 
-    // on fabrique le chemin vers le fichier cache de l'historique
+    // formatage du chemin absolu vers le fichier d'historique cache
     snprintf(chemin_historique, sizeof(chemin_historique), "%s/.biceps_history", getenv("HOME"));
-    // on charge l'historique depuis le fichier des le demarrage
+    // chargement en ram des commandes tapees lors des sessions precedentes
     read_history(chemin_historique);
 
-    // on demarre la boucle infinie qui attend les ordres
+    // boucle interactive principale (le coeur du shell)
     while (1) {
         char cwd[1024];
         char chemin_affiche[1024] = "";
         
-        // on verifie dans quel dossier on se trouve actuellement pour l'afficher
+        // recuperation du dossier courant a chaque tour pour la dynamicite du prompt
         if (getcwd(cwd, sizeof(cwd)) != NULL) {
             snprintf(chemin_affiche, sizeof(chemin_affiche), " [%s]", cwd);
         }
         
-        // on fabrique la phrase d'accueil (prompt)
+        // assemblage de la chaine complete du prompt d'accueil
         snprintf(prompt, sizeof(prompt), "%s@%s%s%c ", nom_utilisateur, nom_machine, chemin_affiche, caractere_fin);
 
-        // on bloque le programme en attendant que l'utilisateur tape sur entree
+        // attente bloquante d'une saisie utilisateur via la librairie gnu readline
         ligne_saisie = readline(prompt);
         
-        // si l'utilisateur appuie sur ctrl+d (fin de fichier), on arrete la boucle
+        // interception du caractere eof (ctrl-d) pour quitter proprement
         if (ligne_saisie == NULL) {
             printf("\nsortie correcte du programme biceps.\n");
-            // on sauvegarde l'historique avant de quitter par eof
+            // derniere sauvegarde de l'historique avant de casser la boucle
             write_history(chemin_historique);
             break;
         }
 
-        // si on a tape une commande jugee utile (pas que des espaces)
+        // filtrage des entrees vides pour ne pas polluer l'historique
         if (est_ligne_utile(ligne_saisie)) {
-            // on sauvegarde la frappe pour la reutiliser avec les fleches
+            // ajout de la ligne a la structure memoire de readline
             add_history(ligne_saisie);
-            // on lance le traitement de toute la ligne (qui peut contenir des points-virgules)
+            // transmission de la chaine brute au moteur de traitement de la librairie
             traiterSequence(ligne_saisie);
         }
-        // on vide la ligne lue pour preparer le prochain tour
+        // liberation de la ligne lue par readline
         free(ligne_saisie);
     }
     
-    // grand menage avant la fermeture definitive
-    if (Mots != NULL) {
-        for (int i = 0; i < NMots; i++) free(Mots[i]);
-        free(Mots);
-    }
+    // securite finale: appel de la purge memoire en cas de sortie anormale de la boucle
+    libererMots();
     return 0;
 }

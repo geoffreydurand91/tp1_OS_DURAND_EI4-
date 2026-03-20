@@ -2,11 +2,18 @@ CC = gcc
 CFLAGS = -Wall
 LDFLAGS = -lreadline
 
-biceps: biceps.c
-	$(CC) $(CFLAGS) -o biceps biceps.c $(LDFLAGS)
+# on assemble les deux fichiers objets pour creer l'executable
+biceps: biceps.o gescom.o
+	$(CC) $(CFLAGS) -o biceps biceps.o gescom.o $(LDFLAGS)
 
-trace: biceps.c
-	$(CC) $(CFLAGS) -DTRACE -o biceps biceps.c $(LDFLAGS)
+# compilation du programme principal
+biceps.o: biceps.c gescom.h
+	$(CC) $(CFLAGS) -c biceps.c
 
+# compilation de la bibliotheque de gestion de commandes
+gescom.o: gescom.c gescom.h
+	$(CC) $(CFLAGS) -c gescom.c
+
+# menage des fichiers binaires
 clean:
-	rm -f biceps
+	rm -f biceps *.o
