@@ -4,6 +4,7 @@
 #include <string.h>
 #include <sys/types.h>
 #include <sys/wait.h>
+#include <signal.h>
 #include <readline/readline.h>
 #include <readline/history.h>
 
@@ -20,6 +21,7 @@ static char **Mots = NULL; // tableau dynamique qui contiendra les mots d'une co
 static int NMots = 0; // compteur du nombre de mots trouves
 CommandeInterne TabComInt[NBMAXC]; // le tableau qui liste nos commandes internes
 int NbComInt = 0; // le compteur de commandes internes actuellement enregistrees
+char chemin_historique[1024]; // chemin vers le fichier de sauvegarde de l'historique
 
 // fonction qui alloue de la memoire pour dupliquer une chaine de caracteres
 char *copyString(char *s) {
@@ -58,6 +60,15 @@ int analyseCom(char *b) {
     return NMots; // on renvoie le nombre de mots trouves
 }
 
+// verifie si la ligne contient autre chose que des espaces pour l'historique
+int est_ligne_utile(const char *ligne) {
+    while (*ligne != '\0') {
+        if (*ligne != ' ' && *ligne != '\t') return 1; // vrai des qu'on trouve un caractere normal
+        ligne++;
+    }
+    return 0; // faux si on n'a trouve que des espaces ou la fin
+}
+
 // fonction executee quand l'utilisateur tape exit
 int Sortie(int N, char *P[]) {
     // on doit vider la memoire proprement avant de tuer le programme
@@ -65,7 +76,9 @@ int Sortie(int N, char *P[]) {
         for (int i = 0; i < NMots; i++) free(Mots[i]);
         free(Mots);
     }
-    printf("fermeture du programme...\n");
+    // on sauvegarde l'historique dans le fichier avant de partir
+    write_history(chemin_historique);
+    printf("sortie correcte du programme biceps.\n");
     exit(0); // on quitte avec le code de succes 0
     return 0; 
 }
@@ -194,6 +207,9 @@ int main(void) {
     char *ligne_saisie;
     char caractere_fin;
 
+    // on demande au systeme d'ignorer le signal d'interruption lie a ctrl-c
+    signal(SIGINT, SIG_IGN);
+
     majComInt(); // on charge la memoire des commandes connues
 
     // on cherche comment s'appelle l'ordinateur
@@ -205,6 +221,11 @@ int main(void) {
     
     // on adapte le symbole final si on est un administrateur ou non
     caractere_fin = (geteuid() == 0) ? '#' : '$';
+
+    // on fabrique le chemin vers le fichier cache de l'historique
+    snprintf(chemin_historique, sizeof(chemin_historique), "%s/.biceps_history", getenv("HOME"));
+    // on charge l'historique depuis le fichier des le demarrage
+    read_history(chemin_historique);
 
     // on demarre la boucle infinie qui attend les ordres
     while (1) {
@@ -224,12 +245,14 @@ int main(void) {
         
         // si l'utilisateur appuie sur ctrl+d (fin de fichier), on arrete la boucle
         if (ligne_saisie == NULL) {
-            printf("\n");
+            printf("\nsortie correcte du programme biceps.\n");
+            // on sauvegarde l'historique avant de quitter par eof
+            write_history(chemin_historique);
             break;
         }
 
-        // si on a tape autre chose que juste la touche entree
-        if (strlen(ligne_saisie) > 0) {
+        // si on a tape une commande jugee utile (pas que des espaces)
+        if (est_ligne_utile(ligne_saisie)) {
             // on sauvegarde la frappe pour la reutiliser avec les fleches
             add_history(ligne_saisie);
             // on lance le traitement de toute la ligne (qui peut contenir des points-virgules)
