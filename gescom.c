@@ -4,6 +4,7 @@
 #include <string.h>
 #include <sys/types.h>
 #include <sys/wait.h>
+#include <fcntl.h> 
 #include "gescom.h"
 
 // on definit la limite de commandes internes que le tableau peut stocker
@@ -62,6 +63,108 @@ int analyseCom(char *b) {
     return NMots;
 }
 
+// fonction pour intercepter et appliquer les redirections de flux (appelee dans un processus enfant)
+void gererRedirections(char **args) {
+    int i = 0;
+    // on parcourt tous les mots de la commande a la recherche de symboles de redirection
+    while (args[i] != NULL) {
+        if (strcmp(args[i], "<") == 0) {
+            if (args[i+1] != NULL) {
+                // ouverture du fichier en lecture seule
+                int fd = open(args[i+1], O_RDONLY);
+                if (fd >= 0) { 
+                    dup2(fd, 0); // la fonction dup2 remplace l'entree standard (0) par notre fichier
+                    close(fd); 
+                } else { 
+                    perror("erreur redirection <"); exit(1); 
+                }
+                // on decale tout le tableau vers la gauche pour faire disparaitre le symbole et le fichier
+                int j = i;
+                while (args[j+2] != NULL) { args[j] = args[j+2]; j++; }
+                args[j] = NULL;
+            }
+        } else if (strcmp(args[i], ">") == 0) {
+            if (args[i+1] != NULL) {
+                // ouverture en ecriture, creation si inexistant, et ecrasement (O_TRUNC) si existant
+                int fd = open(args[i+1], O_WRONLY | O_CREAT | O_TRUNC, 0644);
+                if (fd >= 0) { dup2(fd, 1); close(fd); } // on remplace la sortie standard (1)
+                else { perror("erreur redirection >"); exit(1); }
+                int j = i;
+                while (args[j+2] != NULL) { args[j] = args[j+2]; j++; }
+                args[j] = NULL;
+            }
+        } else if (strcmp(args[i], ">>") == 0) {
+            if (args[i+1] != NULL) {
+                // ouverture en ecriture, mais ajout a la fin du fichier (O_APPEND)
+                int fd = open(args[i+1], O_WRONLY | O_CREAT | O_APPEND, 0644);
+                if (fd >= 0) { dup2(fd, 1); close(fd); }
+                else { perror("erreur redirection >>"); exit(1); }
+                int j = i;
+                while (args[j+2] != NULL) { args[j] = args[j+2]; j++; }
+                args[j] = NULL;
+            }
+        } else if (strcmp(args[i], "2>") == 0) {
+            if (args[i+1] != NULL) {
+                // ecrasement mais pour la sortie d'erreur standard (2)
+                int fd = open(args[i+1], O_WRONLY | O_CREAT | O_TRUNC, 0644);
+                if (fd >= 0) { dup2(fd, 2); close(fd); }
+                else { perror("erreur redirection 2>"); exit(1); }
+                int j = i;
+                while (args[j+2] != NULL) { args[j] = args[j+2]; j++; }
+                args[j] = NULL;
+            }
+        } else if (strcmp(args[i], "2>>") == 0) {
+            if (args[i+1] != NULL) {
+                // ajout a la fin pour la sortie d'erreur standard (2)
+                int fd = open(args[i+1], O_WRONLY | O_CREAT | O_APPEND, 0644);
+                if (fd >= 0) { dup2(fd, 2); close(fd); }
+                else { perror("erreur redirection 2>>"); exit(1); }
+                int j = i;
+                while (args[j+2] != NULL) { args[j] = args[j+2]; j++; }
+                args[j] = NULL;
+            }
+        } else if (strcmp(args[i], "<<") == 0) {
+            if (args[i+1] != NULL) {
+                // pour le here-document, on utilise un fichier temporaire unique cree par mkstemp
+                char temp_file[] = "/tmp/biceps_heredoc_XXXXXX";
+                int fd_temp = mkstemp(temp_file);
+                if (fd_temp >= 0) {
+                    char *delim = args[i+1];
+                    char *line = NULL;
+                    size_t len = 0;
+                    ssize_t read_len;
+                    // on bloque et on lit l'entree clavier de l'utilisateur
+                    while (1) {
+                        write(1, "> ", 2); // on affiche un petit prompt secondaire
+                        read_len = getline(&line, &len, stdin);
+                        if (read_len == -1) break; // en cas de ctrl+d
+                        // on arrete de lire si la ligne tapee correspond exactement au mot cle (delimiteur)
+                        if (strncmp(line, delim, strlen(delim)) == 0 && (line[strlen(delim)] == '\n' || line[strlen(delim)] == '\0')) {
+                            break;
+                        }
+                        // on ecrit ce qu'il a tape dans notre fichier temporaire
+                        write(fd_temp, line, read_len);
+                    }
+                    free(line);
+                    close(fd_temp);
+                    // on re-ouvre ce fichier rempli en lecture seule et on le branche sur l'entree standard (0)
+                    fd_temp = open(temp_file, O_RDONLY);
+                    dup2(fd_temp, 0);
+                    close(fd_temp);
+                    // on demande au systeme de detruire ce fichier temporaire des que le programme s'arretera
+                    unlink(temp_file); 
+                }
+                int j = i;
+                while (args[j+2] != NULL) { args[j] = args[j+2]; j++; }
+                args[j] = NULL;
+            }
+        } else {
+            // si le mot n'est pas un symbole de redirection, on passe simplement au mot suivant
+            i++;
+        }
+    }
+}
+
 // enregistrement d'une nouvelle fonction dans le dictionnaire des commandes internes
 void ajouteCom(char *nom, int (*fonc)(int, char **)) {
     // verification de la capacite du tableau avant insertion
@@ -107,6 +210,10 @@ int execComExt(char **P) {
         return -1;
     } else if (pid == 0) {
         // nous sommes dans le processus fils
+        
+        // on verifie s'il y a des redirections a mettre en place avant d'executer la commande
+        gererRedirections(P);
+
 #ifdef TRACE
         printf("[trace] processus enfant va executer : %s\n", P[0]);
 #endif
@@ -190,9 +297,13 @@ void traiterPipes(char *sequence) {
                 close(fd[0]);   // l'enfant ne lit pas ce qu'il est en train d'ecrire
             }
 
-            // maintenant que les flux (in/out) sont devies, on analyse la sous-commande
+            // maintenant que les flux generaux (pipes) sont devies, on analyse la sous-commande
             analyseCom(cmd_brute[i]);
             if (NMots > 0) {
+                
+                // on applique les redirections eventuelles specifiques a cette sous-commande (ex: >> fichier)
+                gererRedirections(Mots);
+                
                 // on essaie de lancer la commande comme une commande interne
                 if (execComInt(NMots, Mots) == 0) {
                     // sinon on demande au systeme de la lancer
