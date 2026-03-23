@@ -28,17 +28,17 @@ void libererMots(void) {
         for (int i = 0; i < NMots; i++) free(Mots[i]);
         // on libere ensuite le tableau de pointeurs lui-meme
         free(Mots);
-        // on reinitialise les compteurs pour eviter les pointeurs fous (dangling pointers)
+        // on reinitialise les compteurs pour eviter les problemes memoire
         Mots = NULL;
         NMots = 0;
     }
 }
 
-// analyse et decoupage d'une chaine de caracteres en tableau d'arguments
+// analyse et decoupage d'une chaine de caracteres en tableau d'arguments par les espaces
 int analyseCom(char *b) {
     char *delim = " \t\n"; // delimiteurs classiques du shell
     char *token;
-    int capacite_max = 20; // allocation arbitraire pour des raisons de token efficiency
+    int capacite_max = 20; // allocation arbitraire pour preserver la memoire
 
     // on nettoie d'abord les residus d'une eventuelle commande precedente
     libererMots();
@@ -51,7 +51,7 @@ int analyseCom(char *b) {
     while ((token = strsep(&b, delim)) != NULL) {
         // on ignore les chaines vides (cas de plusieurs espaces consecutifs)
         if (*token != '\0') {
-            // strdup alloue la memoire et copie la chaine en une seule operation standard
+            // strdup alloue la memoire et copie la chaine en une seule operation
             Mots[NMots] = strdup(token);
             NMots++;
         }
@@ -96,7 +96,7 @@ int execComInt(int N, char **P) {
     return 0;
 }
 
-// creation d'un processus enfant pour deleguer l'execution a l'os
+// creation d'un processus enfant simple pour executer une commande seule
 int execComExt(char **P) {
     // la fonction fork duplique le processus courant
     pid_t pid = fork();
@@ -106,7 +106,7 @@ int execComExt(char **P) {
         perror("erreur fork");
         return -1;
     } else if (pid == 0) {
-        // nous sommes dans le processus fils (pid == 0)
+        // nous sommes dans le processus fils
 #ifdef TRACE
         printf("[trace] processus enfant va executer : %s\n", P[0]);
 #endif
@@ -127,6 +127,108 @@ int execComExt(char **P) {
     return 0;
 }
 
+// gestion avancee des tubes (pipes) pour transferer les flux entre commandes
+void traiterPipes(char *sequence) {
+    char *cmd_brute[20]; // tableau pour stocker chaque bloc de commande separe par un |
+    int nb_cmds = 0;
+    char *token;
+    char *delim = "|";
+
+    // decoupage de la chaine par le caractere pipe
+    while ((token = strsep(&sequence, delim)) != NULL) {
+        if (strlen(token) > 0) {
+            cmd_brute[nb_cmds] = strdup(token);
+            nb_cmds++;
+        }
+    }
+
+    // s'il n'y a qu'une seule commande, pas de pipe, on garde le comportement classique
+    if (nb_cmds == 1) {
+        analyseCom(cmd_brute[0]);
+        if (NMots > 0) {
+            if (execComInt(NMots, Mots) == 0) {
+                execComExt(Mots);
+            }
+        }
+        free(cmd_brute[0]); // nettoyage immediat
+        return;
+    }
+
+    // s'il y a plusieurs commandes, on doit construire les embranchements
+    int i;
+    int in_fd = 0; // descripteur de memoire de lecture (0 = terminal par defaut)
+    int fd[2]; // tableau de descripteurs pour un nouveau tube (0: lecture, 1: ecriture)
+    pid_t pid;
+
+    // on boucle sur chaque commande isolee de notre tuyauterie
+    for (i = 0; i < nb_cmds; i++) {
+        // on cree un nouveau tube systeme si l'on n'est pas a la toute derniere etape
+        if (i < nb_cmds - 1) {
+            if (pipe(fd) < 0) {
+                perror("erreur creation tube");
+                return; 
+            }
+        }
+
+        // on clone le processus pour la sous-commande en cours
+        pid = fork(); 
+        
+        if (pid < 0) {
+            perror("erreur fork");
+        } else if (pid == 0) {
+            // --- nous sommes dans le clone (l'enfant) ---
+
+            // si ce n'est pas la premiere etape, on force la lecture depuis le tube precedent
+            if (in_fd != 0) {
+                dup2(in_fd, 0); // on ecrase l'entree standard (0) par le canal de lecture precedent
+                close(in_fd);   // on ferme le canal original pour ne pas saturer le systeme
+            }
+            // si ce n'est pas la derniere etape, on force l'ecriture vers le nouveau tube
+            if (i < nb_cmds - 1) {
+                dup2(fd[1], 1); // on ecrase la sortie standard (1) par le canal d'ecriture du tube
+                close(fd[1]);   // on ferme le canal original
+                close(fd[0]);   // l'enfant ne lit pas ce qu'il est en train d'ecrire
+            }
+
+            // maintenant que les flux (in/out) sont devies, on analyse la sous-commande
+            analyseCom(cmd_brute[i]);
+            if (NMots > 0) {
+                // on essaie de lancer la commande comme une commande interne
+                if (execComInt(NMots, Mots) == 0) {
+                    // sinon on demande au systeme de la lancer
+                    execvp(Mots[0], Mots);
+                    // si le systeme rend la main, c'est une erreur
+                    printf("commande introuvable dans le pipe : %s\n", Mots[0]);
+                }
+            }
+            // on detruit cet enfant independamment du succes ou non pour eviter un fork bomb
+            exit(1); 
+        } else {
+            // --- nous sommes dans le parent (le shell global) ---
+
+            // on ferme le bout de lecture du tube precedent dont on n'a plus besoin
+            if (in_fd != 0) {
+                close(in_fd);
+            }
+            // on sauvegarde le bout de lecture du nouveau tube pour l'enfant de la boucle suivante
+            if (i < nb_cmds - 1) {
+                close(fd[1]); // le parent ne fera jamais d'ecriture la-dedans
+                in_fd = fd[0]; // transfert de la responsabilite de lecture au prochain tour
+            }
+        }
+    }
+
+    // le parent doit desormais attendre la fin de vie de tous les processus enfants du pipe
+    for (i = 0; i < nb_cmds; i++) {
+        wait(NULL);
+    }
+
+    // nettoyage massif de la memoire des chaines temporaires
+    for (i = 0; i < nb_cmds; i++) {
+        free(cmd_brute[i]);
+    }
+}
+
 // gestion de l'enchainement des commandes separees par des points-virgules
 void traiterSequence(char *ligne) {
     char *commande_seule;
@@ -136,15 +238,8 @@ void traiterSequence(char *ligne) {
     while ((commande_seule = strsep(&ligne, delimiteur_sequence)) != NULL) {
         // verification que la sous-commande n'est pas vide
         if (strlen(commande_seule) > 0) {
-            // on envoie la sous-commande a l'analyseur de mots
-            analyseCom(commande_seule);
-            // si l'analyse a retourne au moins un mot valide
-            if (NMots > 0) {
-                // on essaie d'abord la resolution interne, sinon resolution systeme
-                if (execComInt(NMots, Mots) == 0) {
-                    execComExt(Mots);
-                }
-            }
+            // on delegue la tache au gestionnaire de pipes au lieu d'executer directement
+            traiterPipes(commande_seule);
         }
     }
 }
